@@ -1,0 +1,523 @@
+// TaxOS — PostgreSQL schema via Prisma (§35/§36).
+// Every user-owned table is tenant-scoped with userId (§73).
+// Imported source records are immutable; normalized records reference them (§36).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Plan {
+  FREE
+  PLUS
+  PRO
+}
+
+enum DocType {
+  FORM_16
+  FORM_16A
+  AIS
+  FORM_26AS
+  BANK_STATEMENT
+  BANK_INTEREST_CERT
+  BROKER_STATEMENT
+  CAPITAL_GAINS_STATEMENT
+  MF_CAPITAL_GAINS_STATEMENT
+  DIVIDEND_STATEMENT
+  NPS_STATEMENT
+  INSURANCE_RECEIPT
+  HOME_LOAN_INTEREST_CERT
+  DONATION_RECEIPT
+  OTHER
+}
+
+enum ImportStatus {
+  UPLOADED
+  PROCESSING
+  EXTRACTED
+  REVIEW_REQUIRED
+  CONFIRMED
+  FAILED
+}
+
+enum RecordStatus {
+  MATCHED
+  DUPLICATE
+  MISSING
+  CONFLICT
+  NEEDS_REVIEW
+  USER_CONFIRMED
+}
+
+enum IncomeCategory {
+  SALARY
+  PENSION
+  HOUSE_PROPERTY
+  INTEREST_SAVINGS
+  INTEREST_FD
+  DIVIDEND
+  OTHER_INTEREST
+  CAPITAL_GAINS_STCG_111A
+  CAPITAL_GAINS_LTCG_112A
+  CAPITAL_GAINS_LTCG_112
+  CAPITAL_GAINS_SLAB
+  OTHER_SOURCE
+  FREELANCE
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String?   // null for OAuth/OTP-only accounts
+  googleSub     String?   @unique
+  name          String?
+  role          String    @default("USER") // USER | ADMIN
+  plan          Plan      @default(FREE)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  sessions      Session[]
+  otpCodes      OtpCode[]
+  profiles      TaxProfile[]
+  documents     Document[]
+  incomeRecords IncomeRecord[]
+  payments      TaxPayment[]
+  credits       TaxCredit[]
+  deductions    Deduction[]
+  calculations  TaxCalculation[]
+  reconciliations Reconciliation[]
+  reconIssues   ReconciliationIssue[]
+  itrEligibility ITREligibility[]
+  checklists    ITRChecklist[]
+  projections   TaxProjection[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+  subscriptions Subscription[]
+  aisRecords    AISRecord[]
+  form26asRecords Form26ASRecord[]
+  investments   InvestmentHolding[]
+  transactions  InvestmentTransaction[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique // sha256 of session cookie token
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  ip        String?
+  userAgent String?
+
+  @@index([userId])
+}
+
+model OtpCode {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String   // bcrypt hash — OTP itself never stored in plaintext (§7)
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model TaxProfile {
+  id               String  @id @default(cuid())
+  userId           String
+  user             User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear          String  // e.g. "2026-27" — year-specific rules (§8)
+  name             String?
+  dob              DateTime?
+  residentialStatus String @default("RESIDENT")
+  state            String?
+  panEncrypted     String? // AES-256-GCM at rest (§38)
+  taxpayerCategory String  @default("INDIVIDUAL")
+  employmentType   String?
+  isSalaried       Boolean @default(true)
+  isInvestor       Boolean @default(false)
+  hasCapitalGains  Boolean @default(false)
+  ownsProperty     Boolean @default(false)
+  hasFreelance     Boolean @default(false)
+  hasForeignIncome Boolean @default(false)
+  incomeDiscovery  Json?   // the §8 step-3 card selections
+  onboardingComplete Boolean @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([userId, taxYear])
+}
+
+model IncomeRecord {
+  id               String         @id @default(cuid())
+  userId           String
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear          String
+  source           String         // MANUAL | FORM_16 | AIS | BANK | BROKER | MF
+  sourceDocumentId String?
+  category         IncomeCategory
+  amountPaise      BigInt
+  currency         String         @default("INR")
+  transactionDate  DateTime?
+  confidence       Float          @default(1.0)
+  status           RecordStatus   @default(NEEDS_REVIEW)
+  description      String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([userId, taxYear])
+  @@index([userId, category])
+}
+
+model AISRecord {
+  id          String  @id @default(cuid())
+  userId      String
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId  String?
+  taxYear     String
+  informationType String
+  description String
+  amountPaise BigInt
+  txnDate     String?
+  section     String?
+  counterparty String?
+  confidence  Float
+  raw         Json    // immutable original (§36)
+  createdAt   DateTime @default(now())
+
+  @@index([userId, taxYear])
+}
+
+model Form26ASRecord {
+  id          String  @id @default(cuid())
+  userId      String
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId  String?
+  taxYear     String
+  deductor    String
+  tan         String?
+  section     String
+  txnDate     String?
+  amountPaidPaise BigInt
+  tdsPaise    BigInt
+  isTCS       Boolean @default(false)
+  confidence  Float
+  raw         Json
+  createdAt   DateTime @default(now())
+
+  @@index([userId, taxYear])
+}
+
+model TaxPayment {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear   String
+  type      String  // ADVANCE_TAX | SELF_ASSESSMENT
+  amountPaise BigInt
+  challanNo String?
+  paidOn    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, taxYear])
+}
+
+model TaxCredit {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear   String
+  type      String  // TDS | TCS
+  amountPaise BigInt
+  section   String?
+  deductor  String?
+  source    String  // FORM_26AS | AIS | MANUAL
+  createdAt DateTime @default(now())
+
+  @@index([userId, taxYear])
+}
+
+model Deduction {
+  id      String  @id @default(cuid())
+  userId  String
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear String
+  section String  // 80C | 80D | 80CCD(1B) | 24b ...
+  label   String
+  amountPaise BigInt
+  createdAt DateTime @default(now())
+
+  @@index([userId, taxYear])
+}
+
+model Document {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear      String
+  docType      DocType
+  fileName     String
+  storageKey   String    @unique // object storage key (§39)
+  mimeType     String
+  sizeBytes    Int
+  checksum     String    // sha256
+  importStatus ImportStatus @default(UPLOADED)
+  errorNote    String?   // friendly error (§56)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  extractions  DocumentExtraction[]
+
+  @@index([userId, taxYear])
+}
+
+model DocumentExtraction {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  engine     String   // REGEX | LLM | HYBRID
+  payload    Json     // schema-validated structured output (§34)
+  avgConfidence Float
+  needsReview Boolean @default(false)
+  confirmedPayload Json? // after human confirmation
+  createdAt  DateTime @default(now())
+}
+
+model InvestmentHolding {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear  String
+  security String
+  isin     String?
+  assetKind String // EQUITY | EQUITY_MF | DEBT_MF | OTHER
+  folio    String?
+  quantity Float   @default(0)
+  costPaise BigInt @default(0)
+  createdAt DateTime @default(now())
+
+  transactions InvestmentTransaction[]
+  @@index([userId, taxYear])
+}
+
+model InvestmentTransaction {
+  id          String  @id @default(cuid())
+  userId      String
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  holdingId   String?
+  holding     InvestmentHolding? @relation(fields: [holdingId], references: [id], onDelete: SetNull)
+  taxYear     String
+  source      String  // BROKER | MF | CAMS | KFintech | MANUAL
+  sourceRef   String? // dedupe key (§53)
+  buyDate     String?
+  sellDate    String?
+  quantity    Float
+  buyValuePaise  BigInt
+  sellValuePaise BigInt
+  chargesPaise   BigInt @default(0)
+  gainPaise      BigInt @default(0)
+  holdingType    String @default("OPEN") // ST | LT | OPEN
+  confidence     Float  @default(1)
+  status         RecordStatus @default(NEEDS_REVIEW)
+  createdAt      DateTime @default(now())
+
+  @@index([userId, taxYear])
+  @@index([sourceRef])
+}
+
+model Reconciliation {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear  String
+  category String
+  status   RecordStatus
+  differencePaise BigInt @default(0)
+  summary  Json    // record snapshots that produced this verdict
+  resolved Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  issues ReconciliationIssue[]
+  @@unique([userId, taxYear, category])
+}
+
+model ReconciliationIssue {
+  id          String  @id @default(cuid())
+  userId      String
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reconciliationId String
+  reconciliation Reconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  priority    String  // HIGH | REVIEW | RESOLVED
+  sourceA     String
+  sourceB     String?
+  amountAPaise BigInt
+  amountBPaise BigInt?
+  explanation String  // "Potential mismatch…" language (§24)
+  action      String
+  resolved    Boolean @default(false)
+  resolution  String?
+  createdAt   DateTime @default(now())
+}
+
+model TaxCalculation {
+  id            String  @id @default(cuid())
+  userId        String
+  user          User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear       String
+  regime        String  // NEW | OLD
+  lawVersion    String
+  ruleVersion   String
+  grossIncomePaise     BigInt
+  deductionsPaise      BigInt
+  taxableIncomePaise   BigInt
+  slabTaxPaise         BigInt
+  specialRateTaxPaise  BigInt
+  rebatePaise          BigInt
+  surchargePaise       BigInt
+  cessPaise            BigInt
+  totalTaxPaise        BigInt
+  tdsPaise             BigInt
+  tcsPaise             BigInt
+  advanceTaxPaise      BigInt
+  selfAssessmentPaise  BigInt
+  refundOrPayablePaise BigInt
+  calculatedAt  DateTime @default(now())
+
+  lines TaxCalculationLine[]
+  @@index([userId, taxYear])
+}
+
+model TaxCalculationLine {
+  id             String  @id @default(cuid())
+  calculationId  String
+  calculation    TaxCalculation @relation(fields: [calculationId], references: [id], onDelete: Cascade)
+  category       String
+  description    String
+  baseAmountPaise BigInt
+  rate           Float?
+  taxAmountPaise BigInt
+  source         String
+  ruleId         String  // every number traceable to a rule (§11/§81)
+}
+
+model TaxRule {
+  id            String  @id @default(cuid())
+  taxYear       String
+  ruleType      String  // SLAB | REBATE | DEDUCTION | SURCHARGE | CESS | CG | ITR
+  ruleId        String  @unique
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  sourceName    String
+  sourceUrl     String
+  sourceReference String
+  version       String
+  status        String  @default("DRAFT") // DRAFT|REVIEW|SOURCE_VERIFIED|APPROVED|PUBLISHED (§50)
+  payload       Json
+  retrievedOn   DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([taxYear, status])
+}
+
+model ITREligibility {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear   String
+  likelyForm String
+  reasons   Json
+  conditions Json
+  disclaimer String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, taxYear])
+}
+
+model ITRChecklist {
+  id      String  @id @default(cuid())
+  userId  String
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear String
+  items   Json    // [{key,label,state:"done|warn|todo",hint}]
+  progress Int    @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, taxYear])
+}
+
+model TaxProjection {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taxYear  String
+  inputs   Json    // expected salary/bonus/interest/gains (§31)
+  result   Json    // projected calc snapshot (simulation only)
+  createdAt DateTime @default(now())
+
+  @@index([userId, taxYear])
+}
+
+model Subscription {
+  id                String  @id @default(cuid())
+  userId            String
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan              Plan
+  status            String  // ACTIVE | CANCELLED | PAST_DUE
+  provider          String  // razorpay | stripe | manual
+  externalSubId     String? @unique
+  externalOrderId   String?
+  currentPeriodEnd  DateTime?
+  cancelAtPeriodEnd Boolean @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Payment {
+  id            String  @id @default(cuid())
+  userId        String
+  subscriptionId String?
+  externalPaymentId String? @unique
+  provider      String
+  amountPaise   BigInt
+  currency      String  @default("INR")
+  status        String  // CREATED | PAID | FAILED | REFUNDED
+  webhookPayload Json?
+  createdAt     DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String   // DOCUMENT_PROCESSED | MISMATCH | IMPORT_COMPLETE | CALC_UPDATED
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+}
+
+model AuditLog {
+  id       String   @id @default(cuid())
+  userId   String?
+  user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action   String   // LOGIN | LOGOUT | DOC_UPLOAD | DOC_DELETE | EXTRACTION | CORRECTION | CALC | EXPORT | SUBSCRIPTION | DELETION_REQUEST (§37)
+  meta     Json?    // NEVER passwords/OTPs/raw documents (§37)
+  ip       String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, action])
+}
